@@ -11,7 +11,7 @@ set -euo pipefail
 # This creates a user and installs WEB01's public key for passwordless SSH.
 
 USERNAME="${1:-}"
-PUBKEY_SRC="web01/public-key/id_rsa.pub"   # adjust if your repo path is different
+PUBKEY_SRC="/home/hamed/SYS265/web01/public-key/id_rsa.pub"   # adjust if your repo path is different
 
 if [[ -z "$USERNAME" ]]; then
   echo "Usage: sudo $0 <username>"
