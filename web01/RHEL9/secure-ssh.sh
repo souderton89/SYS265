@@ -59,4 +59,5 @@ chown "$USERNAME:$USERNAME" "$AUTH_KEYS"
 
 echo "[+] Done. Test from WEB01:"
 echo "    ssh ${USERNAME}@<server-hostname-or-ip>"
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 
