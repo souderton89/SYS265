@@ -59,5 +59,10 @@ chown "$USERNAME:$USERNAME" "$AUTH_KEYS"
 
 echo "[+] Done. Test from WEB01:"
 echo "    ssh ${USERNAME}@<server-hostname-or-ip>"
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+grep -q "^PermitRootLogin" /etc/ssh/sshd_config \
+  && sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
+  || echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+
+systemctl restart sshd
+
 
