@@ -32,14 +32,13 @@ chown -R ${USER_NAME}:${USER_NAME} "$SSH_DIR"
 echo "[+] Starting ssh-agent and loading private key..."
 
 # Run ssh-agent + ssh-add as deployer
+# Run ssh-agent + ssh-add as deployer
 sudo -u ${USER_NAME} bash <<EOF
 if [ -f "${PRIVATE_KEY}" ]; then
-    eval "\$(ssh-agent -s)" >/dev/null
-    ssh-add -t 14400 
+    eval "\$(ssh-agent -s)"
+    ssh-add -t 14400 "${PRIVATE_KEY}"
     echo "[+] Private key loaded into ssh-agent (4 hour lifetime)."
 else
     echo "[!] Private key not found at ${PRIVATE_KEY}"
 fi
 EOF
-
-echo "[+] SSH setup complete for ${USER_NAME}."
