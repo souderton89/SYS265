@@ -5,7 +5,7 @@
 set -euo pipefail
 
 USER_NAME="deployer"
-PUBKEY_SOURCE="/home/deployer/SYS265/controller01/public-key/id_rsa.pub"
+PUBKEY_SOURCE="SYS265/controller01/public-key/id_rsa.pub"
 SSH_DIR="/home/${USER_NAME}/.ssh"
 AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 
