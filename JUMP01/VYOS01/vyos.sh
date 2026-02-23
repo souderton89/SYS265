@@ -1,7 +1,7 @@
 #!/bin/vbash
 # vyos-dynamic-menu.sh
 # Dynamic CRUD menu for Firewall (ipv4 rulesets) + NAT + Interfaces
-# Scans live config each time (cached per screen). No hardcoded rules.
+# Scans live config each time. No hardcoded rules.
 #
 # SAFETY GOALS:
 # - "ADD" must NOT overwrite existing items.
@@ -13,24 +13,26 @@
 # USER FRIENDLY:
 # - Every submenu repeats detected items.
 # - Every prompt explains WHAT you are selecting.
-# - If a list is empty, you get a clear error (no blind "Select:").
+# - If a list is empty (permissions or no config), you get a clear error (no blind "Select:").
 # - Uses grep -F (no regex from user input).
 # - Preview before delete/update.
 #
-# IMPORTANT:
-# - Requires read access to: show configuration commands
+# PORTABILITY FIX (CRITICAL):
+# - Any function used like var="$(func)" MUST print UI to STDERR,
+#   and ONLY print the final value to STDOUT.
+#   Otherwise menus get "captured" and disappear on some systems/terminals.
 
 source /opt/vyatta/etc/functions/script-template
 
 # -----------------------------
-# Globals (config cache)
+# UI helpers (IMPORTANT)
 # -----------------------------
-CFG_CACHE=""
+ui() { echo "$*" >&2; }
+uiblank() { echo >&2; }
+uiprintf() { printf "%s" "$*" >&2; }
+uiprintfln() { printf "%s\n" "$*" >&2; }
 
-# -----------------------------
-# Helpers
-# -----------------------------
-pause() { echo; read -r -p "Press Enter to continue..." _; }
+pause() { uiblank; read -r -p "Press Enter to continue..." _; }
 
 strip_quotes() {
   local s="$1"
@@ -41,63 +43,40 @@ strip_quotes() {
 
 join_lines() { tr '\n' ' ' | sed 's/[[:space:]]*$//'; }
 
-# ---- DO NOT use stderr output for parsing ----
-get_cfg_cmds_stdout_only() {
-  # Keep ONLY real "set ..." lines so parsing is safe
-  run show configuration commands 2>/dev/null | grep -E '^set ' || true
-}
-
-# ---- Raw output only for permission check (includes stderr) ----
-get_cfg_cmds_raw_for_access_check() {
-  run show configuration commands 2>&1 || true
-}
-
-refresh_cfg_cache() {
-  CFG_CACHE="$(get_cfg_cmds_stdout_only)"
+# ---- ACCESS CHECKS ----
+get_cfg_cmds() {
+  # capture stderr too so we can detect permission errors
+  run show configuration commands 2>&1
 }
 
 die_no_access_if_needed() {
   local out
-  out="$(get_cfg_cmds_raw_for_access_check)"
+  out="$(get_cfg_cmds || true)"
 
   if echo "$out" | grep -qiE "not assigned to any operator group|permission denied|authorization|not authorized|internal error"; then
-    echo
-    echo "ERROR: This user does not have permission to read the live config."
-    echo "The script needs: 'show configuration commands'."
-    echo
-    echo "Fix:"
-    echo "  - Run as a VyOS admin user, OR"
-    echo "  - Fix this user's operator/admin permissions."
-    echo
-    echo "What VyOS returned:"
-    echo "----------------------------------------"
-    echo "$out"
-    echo "----------------------------------------"
-    echo
+    ui ""
+    ui "ERROR: This user does not have permission to read the live config."
+    ui "The script needs: 'show configuration commands'."
+    ui ""
+    ui "Fix:"
+    ui "  - Run as a VyOS admin user, OR"
+    ui "  - Fix this user's operator/admin permissions."
+    ui ""
+    ui "What VyOS returned:"
+    ui "----------------------------------------"
+    ui "$out"
+    ui "----------------------------------------"
+    ui ""
     exit 1
   fi
 
-  # If stdout-only output is empty, config could genuinely be empty.
-  # That is OK; we handle empty lists with clear messages.
-  return 0
-}
-
-# If a required list is empty, do NOT continue to a blind "Select:" prompt.
-require_nonempty_list_or_return() {
-  # usage: require_nonempty_list_or_return "What list is this?" "${arr[@]}" || return 1
-  local label="$1"; shift
-  local arr=("$@")
-  if [ "${#arr[@]}" -eq 0 ]; then
-    echo
-    echo "ERROR: Nothing available for: $label"
-    echo "Possible reasons:"
-    echo "  - The config has none, OR"
-    echo "  - Permission problem (cannot read config)."
-    echo
-    pause
-    return 1
+  if [ -z "$out" ]; then
+    ui ""
+    ui "ERROR: 'show configuration commands' returned NOTHING."
+    ui "This usually means permission problems or a broken CLI session."
+    ui ""
+    exit 1
   fi
-  return 0
 }
 
 show_detected_summary() {
@@ -107,45 +86,44 @@ show_detected_summary() {
   nd="$(scan_nat_dest_rules | join_lines)"
   ns="$(scan_nat_source_rules | join_lines)"
 
-  echo "Detected right now:"
-  echo "  Interfaces: ${ifs:-NONE}"
-  echo "  FW rulesets: ${rulesets:-NONE}"
-  echo "  NAT dest rules: ${nd:-NONE}"
-  echo "  NAT source rules: ${ns:-NONE}"
-  echo
+  ui "Detected right now:"
+  ui "  Interfaces: ${ifs:-NONE}"
+  ui "  FW rulesets: ${rulesets:-NONE}"
+  ui "  NAT dest rules: ${nd:-NONE}"
+  ui "  NAT source rules: ${ns:-NONE}"
+  ui ""
 }
 
-# Print a numbered menu and return selected item in SELECTED
-# IMPORTANT: This function ALWAYS prints options BEFORE prompting.
+# Print a numbered menu and set SELECTED (UI printed to STDERR)
 select_from_list() {
   local title="$1"; shift
   local arr=("$@")
   local i choice
 
-  echo
-  echo "=== $title ==="
+  ui ""
+  ui "=== $title ==="
 
   if [ "${#arr[@]}" -eq 0 ]; then
-    echo "(none found)"
+    ui "(none found)"
     return 1
   fi
 
   for i in "${!arr[@]}"; do
-    printf "%2d) %s\n" "$((i+1))" "${arr[$i]}"
+    uiprintfln "$(printf "%2d) %s" "$((i+1))" "${arr[$i]}")"
   done
-  echo " 0) Cancel"
-  echo
+  ui " 0) Cancel"
+  ui ""
 
   read -r -p "Select option #: " choice
   if [ -z "$choice" ] || ! echo "$choice" | grep -Eq '^[0-9]+$'; then
-    echo "Invalid."
+    ui "Invalid."
     return 1
   fi
   if [ "$choice" -eq 0 ]; then
     return 1
   fi
   if [ "$choice" -lt 1 ] || [ "$choice" -gt "${#arr[@]}" ]; then
-    echo "Invalid."
+    ui "Invalid."
     return 1
   fi
 
@@ -154,6 +132,7 @@ select_from_list() {
 }
 
 ask() {
+  # prompt to STDERR so it never disappears inside $(...)
   local prompt="$1"
   local def="${2:-}"
   local val=""
@@ -177,13 +156,12 @@ confirm_commit_save() {
 }
 
 cfg_apply() {
-  # Return to the menu after commit/save
   if confirm_commit_save; then
     commit
     save
-    echo "DONE: committed + saved."
+    ui "DONE: committed + saved."
   else
-    echo "Not committed. (No changes saved.)"
+    ui "Not committed. (No changes saved.)"
   fi
   pause
   return 0
@@ -200,7 +178,6 @@ is_number_in_list() {
 }
 
 next_free_rule_number() {
-  # next free integer >= 10 using increments of 10 (10,20,30...)
   local used=("$@")
   local n=10
   while is_number_in_list "$n" "${used[@]}"; do
@@ -214,11 +191,27 @@ require_numeric() {
   echo "$v" | grep -Eq '^[0-9]+$'
 }
 
+require_nonempty_list_or_return() {
+  local label="$1"; shift
+  local arr=("$@")
+  if [ "${#arr[@]}" -eq 0 ]; then
+    ui ""
+    ui "ERROR: Nothing available for: $label"
+    ui "Possible reasons:"
+    ui "  - The config has none, OR"
+    ui "  - Permission problem (cannot read config)."
+    ui ""
+    pause
+    return 1
+  fi
+  return 0
+}
+
 # -----------------------------
-# Scan functions (use cache!)
+# Scan functions (dynamic)
 # -----------------------------
 scan_firewall_rulesets() {
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set firewall ipv4 name " \
     | awk '{print $5}' \
     | sort -u \
@@ -227,7 +220,7 @@ scan_firewall_rulesets() {
 
 scan_firewall_rule_numbers_quoted() {
   local rs="$1"
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set firewall ipv4 name '$rs' rule " \
     | awk '{print $7}' \
     | sort -u
@@ -235,7 +228,7 @@ scan_firewall_rule_numbers_quoted() {
 
 scan_firewall_rule_numbers_unquoted() {
   local rs="$1"
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set firewall ipv4 name $rs rule " \
     | awk '{print $7}' \
     | sort -u
@@ -254,21 +247,21 @@ scan_firewall_rule_numbers() {
 }
 
 scan_nat_dest_rules() {
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set nat destination rule " \
     | awk '{print $5}' \
     | sort -u
 }
 
 scan_nat_source_rules() {
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set nat source rule " \
     | awk '{print $5}' \
     | sort -u
 }
 
 scan_eth_ifaces() {
-  printf "%s\n" "$CFG_CACHE" \
+  get_cfg_cmds \
     | grep -F "set interfaces ethernet " \
     | awk '{print $4}' \
     | sort -u
@@ -281,12 +274,16 @@ fw_choose_ruleset_existing_only() {
   local arr=()
   mapfile -t arr < <(scan_firewall_rulesets)
 
-  echo
-  echo "You are selecting a FIREWALL RULESET (existing)."
-  echo "Examples: DMZ-to-LAN, WAN-to-DMZ, LAN-to-WAN"
-  echo
+  ui ""
+  ui "You are selecting a FIREWALL RULESET (existing)."
+  ui "Examples: DMZ-to-LAN, WAN-to-DMZ, LAN-to-WAN"
+  ui ""
 
   require_nonempty_list_or_return "Firewall rulesets" "${arr[@]}" || return 1
+
+  ui "Available rulesets:"
+  printf "  - %s\n" "${arr[@]}" >&2
+  ui ""
 
   if select_from_list "Select WHICH ruleset to use" "${arr[@]}"; then
     echo "$SELECTED"
@@ -299,22 +296,26 @@ fw_choose_ruleset_or_new() {
   local arr=()
   mapfile -t arr < <(scan_firewall_rulesets)
 
-  echo
-  echo "You are selecting a FIREWALL RULESET."
-  echo "Examples: DMZ-to-LAN, WAN-to-DMZ, LAN-to-WAN"
-  echo
+  ui ""
+  ui "You are selecting a FIREWALL RULESET."
+  ui "Examples: DMZ-to-LAN, WAN-to-DMZ, LAN-to-WAN"
+  ui ""
 
   if [ "${#arr[@]}" -gt 0 ]; then
+    ui "Available rulesets:"
+    printf "  - %s\n" "${arr[@]}" >&2
+    ui ""
+
     if select_from_list "Select a ruleset to use" "${arr[@]}"; then
       echo "$SELECTED"
       return 0
     fi
   else
-    echo "No rulesets detected."
+    ui "No rulesets detected."
   fi
 
-  echo
-  echo "No selection made. Type a ruleset name to create/use."
+  ui ""
+  ui "No selection made. Type a ruleset name to create/use."
   local rs
   rs="$(ask "Ruleset name (example: DMZ-to-LAN)" "")"
   [ -z "$rs" ] && return 1
@@ -326,11 +327,15 @@ fw_choose_rule_number_existing() {
   local arr=()
   mapfile -t arr < <(scan_firewall_rule_numbers "$rs")
 
-  echo
-  echo "You are selecting an EXISTING RULE NUMBER in: $rs"
-  echo
+  ui ""
+  ui "You are selecting an EXISTING RULE NUMBER in: $rs"
+  ui ""
 
   require_nonempty_list_or_return "Firewall rules inside ruleset '$rs'" "${arr[@]}" || return 1
+
+  ui "Existing rule numbers:"
+  printf "  - %s\n" "${arr[@]}" >&2
+  ui ""
 
   if select_from_list "Select existing rule number" "${arr[@]}"; then
     echo "$SELECTED"
@@ -344,26 +349,33 @@ fw_choose_rule_number_new_only() {
   local used=() suggested n
   mapfile -t used < <(scan_firewall_rule_numbers "$rs")
 
-  echo
-  echo "ADD MODE (SAFE): You are selecting a NEW RULE NUMBER in: $rs"
-  echo "Add will NOT overwrite existing numbers."
-  echo
+  ui ""
+  ui "ADD MODE (SAFE): You are selecting a NEW RULE NUMBER in: $rs"
+  ui "Add will NOT overwrite existing numbers."
+  ui ""
+
+  ui "Existing rule numbers:"
+  if [ "${#used[@]}" -gt 0 ]; then
+    printf "  - %s\n" "${used[@]}" >&2
+  else
+    ui "  (none)"
+  fi
+  ui ""
 
   suggested="$(next_free_rule_number "${used[@]}")"
-  echo "Existing rule numbers: ${used[*]:-(none)}"
-  echo "Suggested next free rule number: $suggested"
-  echo
+  ui "Suggested next free rule number: $suggested"
+  ui ""
 
   while true; do
     n="$(ask "Rule number (new only)" "$suggested")"
-    [ -z "$n" ] && echo "Rule number required." && continue
+    [ -z "$n" ] && ui "Rule number required." && continue
     if ! require_numeric "$n"; then
-      echo "ERROR: must be a number (example: 10)."
+      ui "ERROR: must be a number (example: 10)."
       continue
     fi
     if is_number_in_list "$n" "${used[@]}"; then
-      echo "ERROR: rule $n already exists in $rs."
-      echo "Use Update/Delete to change existing rules."
+      ui "ERROR: rule $n already exists in $rs."
+      ui "Use Update/Delete to change existing rules."
       continue
     fi
     break
@@ -373,51 +385,50 @@ fw_choose_rule_number_new_only() {
 
 fw_preview_rule() {
   local rs="$1" n="$2"
-  echo
-  echo "Current config lines for: firewall ipv4 name '$rs' rule $n"
-  echo "--------------------------------------------------------"
-  printf "%s\n" "$CFG_CACHE" | grep -F "set firewall ipv4 name '$rs' rule $n " || true
-  printf "%s\n" "$CFG_CACHE" | grep -F "set firewall ipv4 name $rs rule $n " || true
-  echo "--------------------------------------------------------"
-  echo
+  ui ""
+  ui "Current config lines for: firewall ipv4 name '$rs' rule $n"
+  ui "--------------------------------------------------------"
+  get_cfg_cmds | grep -F "set firewall ipv4 name '$rs' rule $n " || true
+  get_cfg_cmds | grep -F "set firewall ipv4 name $rs rule $n " || true
+  ui "--------------------------------------------------------"
+  ui ""
 }
 
 fw_list_ruleset() {
   local rs
-  echo
-  echo "You selected: List ruleset"
-  echo "Next: choose WHICH ruleset to view."
-  echo
-
+  ui ""
+  ui "You selected: List ruleset"
+  ui "Next: choose WHICH ruleset to view."
+  ui ""
   rs="$(fw_choose_ruleset_existing_only)" || return 0
 
-  echo
-  echo "Showing commands for ruleset: $rs"
-  echo "--------------------------------------------------------"
-  printf "%s\n" "$CFG_CACHE" | grep -F "set firewall ipv4 name '$rs' " || true
-  printf "%s\n" "$CFG_CACHE" | grep -F "set firewall ipv4 name $rs " || true
-  echo "--------------------------------------------------------"
+  ui ""
+  ui "Showing commands for ruleset: $rs"
+  ui "--------------------------------------------------------"
+  get_cfg_cmds | grep -F "set firewall ipv4 name '$rs' " || true
+  get_cfg_cmds | grep -F "set firewall ipv4 name $rs " || true
+  ui "--------------------------------------------------------"
   pause
 }
 
 fw_add_rule_guided_safe() {
   local rs n action proto desc saddr daddr sport dport state_est state_rel state_new
 
-  echo
-  echo "You selected: ADD rule (SAFE - new only)"
-  echo "Next steps:"
-  echo "  1) Select a ruleset"
-  echo "  2) Select a NEW rule number (script suggests next free)"
-  echo "  3) Enter fields"
-  echo
+  ui ""
+  ui "You selected: ADD rule (SAFE - new only)"
+  ui "Next steps:"
+  ui "  1) Select a ruleset"
+  ui "  2) Select a NEW rule number (script suggests next free)"
+  ui "  3) Enter fields"
+  ui ""
 
   rs="$(fw_choose_ruleset_or_new)" || return 0
   n="$(fw_choose_rule_number_new_only "$rs")" || return 0
 
-  echo
-  echo "Now creating NEW rule: firewall ipv4 name '$rs' rule $n"
-  echo "Leave optional fields blank to skip."
-  echo
+  ui ""
+  ui "Now creating NEW rule: firewall ipv4 name '$rs' rule $n"
+  ui "Leave optional fields blank to skip."
+  ui ""
 
   action="$(ask "Action (accept/drop/reject)" "accept")"
   proto="$(ask "Protocol (tcp/udp/icmp/any)" "tcp")"
@@ -430,18 +441,18 @@ fw_add_rule_guided_safe() {
   state_rel="$(ask "Match RELATED state? (y/n)" "n")"
   state_new="$(ask "Match NEW state? (y/n)" "n")"
 
-  echo
-  echo "SUMMARY:"
-  echo "  ruleset: $rs"
-  echo "  rule: $n"
-  echo "  action: $action"
-  [ -n "$proto" ] && echo "  protocol: $proto"
-  [ -n "$saddr" ] && echo "  source address: $saddr"
-  [ -n "$sport" ] && echo "  source port: $sport"
-  [ -n "$daddr" ] && echo "  destination address: $daddr"
-  [ -n "$dport" ] && echo "  destination port: $dport"
-  [ -n "$desc" ] && echo "  description: $desc"
-  echo
+  ui ""
+  ui "SUMMARY:"
+  ui "  ruleset: $rs"
+  ui "  rule: $n"
+  ui "  action: $action"
+  [ -n "$proto" ] && ui "  protocol: $proto"
+  [ -n "$saddr" ] && ui "  source address: $saddr"
+  [ -n "$sport" ] && ui "  source port: $sport"
+  [ -n "$daddr" ] && ui "  destination address: $daddr"
+  [ -n "$dport" ] && ui "  destination port: $dport"
+  [ -n "$desc" ] && ui "  description: $desc"
+  ui ""
   pause
 
   configure
@@ -467,29 +478,28 @@ fw_add_rule_guided_safe() {
 fw_update_single_field() {
   local rs n tail val
 
-  echo
-  echo "You selected: Update ONE field (existing rule)"
-  echo "Next steps:"
-  echo "  1) Select a ruleset"
-  echo "  2) Select an EXISTING rule number"
-  echo "  3) Enter the field path + new value"
-  echo
+  ui ""
+  ui "You selected: Update ONE field (existing rule)"
+  ui "Next steps:"
+  ui "  1) Select a ruleset"
+  ui "  2) Select an EXISTING rule number"
+  ui "  3) Enter the field path + new value"
+  ui ""
 
   rs="$(fw_choose_ruleset_existing_only)" || return 0
   n="$(fw_choose_rule_number_existing "$rs")" || return 0
-
   fw_preview_rule "$rs" "$n"
 
-  echo "Common field paths:"
-  echo "  action"
-  echo "  description"
-  echo "  protocol"
-  echo "  destination address"
-  echo "  destination port"
-  echo "  source address"
-  echo "  source port"
-  echo "  state established"
-  echo
+  ui "Common field paths:"
+  ui "  action"
+  ui "  description"
+  ui "  protocol"
+  ui "  destination address"
+  ui "  destination port"
+  ui "  source address"
+  ui "  source port"
+  ui "  state established"
+  ui ""
 
   tail="$(ask "Field path (words after: rule <N>)" "")"
   [ -z "$tail" ] && return 0
@@ -505,16 +515,15 @@ fw_update_single_field() {
 fw_delete_rule() {
   local rs n
 
-  echo
-  echo "You selected: Delete existing rule"
-  echo "Next steps:"
-  echo "  1) Select a ruleset"
-  echo "  2) Select an EXISTING rule number to delete"
-  echo
+  ui ""
+  ui "You selected: Delete existing rule"
+  ui "Next steps:"
+  ui "  1) Select a ruleset"
+  ui "  2) Select an EXISTING rule number to delete"
+  ui ""
 
   rs="$(fw_choose_ruleset_existing_only)" || return 0
   n="$(fw_choose_rule_number_existing "$rs")" || return 0
-
   fw_preview_rule "$rs" "$n"
 
   configure
@@ -524,21 +533,20 @@ fw_delete_rule() {
 
 firewall_menu() {
   while true; do
-    refresh_cfg_cache
-    echo
-    echo "========================"
-    echo " Firewall Menu (Dynamic)"
-    echo "========================"
+    ui ""
+    ui "========================"
+    ui " Firewall Menu (Dynamic)"
+    ui "========================"
     show_detected_summary
-    echo "SAFE RULES:"
-    echo "  - ADD will NOT overwrite existing rule numbers."
-    echo "  - Update/Delete only work on EXISTING rules."
-    echo
-    echo "1) List ruleset (show commands)"
-    echo "2) ADD rule (SAFE - new only)"
-    echo "3) Update ONE field in an existing rule"
-    echo "4) Delete existing rule"
-    echo "5) Back"
+    ui "SAFE RULES:"
+    ui "  - ADD will NOT overwrite existing rule numbers."
+    ui "  - Update/Delete only work on EXISTING rules."
+    ui ""
+    ui "1) List ruleset (show commands)"
+    ui "2) ADD rule (SAFE - new only)"
+    ui "3) Update ONE field in an existing rule"
+    ui "4) Delete existing rule"
+    ui "5) Back"
     read -r -p "Select menu option #: " c
     case "$c" in
       1) fw_list_ruleset ;;
@@ -546,7 +554,7 @@ firewall_menu() {
       3) fw_update_single_field ;;
       4) fw_delete_rule ;;
       5) return 0 ;;
-      *) echo "Invalid." ;;
+      *) ui "Invalid." ;;
     esac
   done
 }
@@ -555,11 +563,11 @@ firewall_menu() {
 # NAT CRUD
 # -----------------------------
 nat_choose_type() {
-  echo
-  echo "You are selecting a NAT TYPE:"
-  echo "  destination = DNAT / port forwarding"
-  echo "  source      = SNAT / masquerade"
-  echo
+  ui ""
+  ui "You are selecting a NAT TYPE:"
+  ui "  destination = DNAT / port forwarding"
+  ui "  source      = SNAT / masquerade"
+  ui ""
   local t
   t="$(ask "NAT type (destination/source)" "destination")"
   case "$t" in
@@ -578,11 +586,15 @@ nat_choose_rule_number_existing() {
     mapfile -t arr < <(scan_nat_source_rules)
   fi
 
-  echo
-  echo "You are selecting an EXISTING NAT RULE NUMBER (type: $type)"
-  echo
+  ui ""
+  ui "You are selecting an EXISTING NAT RULE NUMBER (type: $type)"
+  ui ""
 
   require_nonempty_list_or_return "NAT $type rules" "${arr[@]}" || return 1
+
+  ui "Existing rule numbers:"
+  printf "  - %s\n" "${arr[@]}" >&2
+  ui ""
 
   if select_from_list "Select existing NAT rule number" "${arr[@]}"; then
     echo "$SELECTED"
@@ -593,21 +605,20 @@ nat_choose_rule_number_existing() {
 
 nat_preview_rule() {
   local type="$1" n="$2"
-  echo
-  echo "Current config lines for: nat $type rule $n"
-  echo "--------------------------------------------------------"
-  printf "%s\n" "$CFG_CACHE" | grep -F "set nat $type rule $n " || true
-  echo "--------------------------------------------------------"
-  echo
+  ui ""
+  ui "Current config lines for: nat $type rule $n"
+  ui "--------------------------------------------------------"
+  get_cfg_cmds | grep -F "set nat $type rule $n " || true
+  ui "--------------------------------------------------------"
+  ui ""
 }
 
 nat_list() {
-  refresh_cfg_cache
-  echo
-  echo "You selected: List NAT"
-  echo "Showing NAT commands (current config):"
-  echo
-  printf "%s\n" "$CFG_CACHE" | grep -F "set nat " || true
+  ui ""
+  ui "You selected: List NAT"
+  ui "Showing NAT commands (current config):"
+  ui ""
+  get_cfg_cmds | grep -F "set nat " || true
   pause
 }
 
@@ -616,33 +627,38 @@ nat_add_dnat_guided() {
   local used=() suggested
   local ifs=()
 
-  refresh_cfg_cache
-
-  echo
-  echo "You selected: Add DNAT rule (SAFE - new only)"
-  echo "Next steps:"
-  echo "  1) Choose a NEW rule number (script suggests next free)"
-  echo "  2) Pick inbound interface"
-  echo "  3) Enter ports + translation"
-  echo
+  ui ""
+  ui "You selected: Add DNAT rule (SAFE - new only)"
+  ui "Next steps:"
+  ui "  1) Choose a NEW rule number (script suggests next free)"
+  ui "  2) Pick inbound interface"
+  ui "  3) Enter ports + translation"
+  ui ""
 
   mapfile -t used < <(scan_nat_dest_rules)
 
+  ui "Existing DNAT (destination) rule numbers:"
+  if [ "${#used[@]}" -gt 0 ]; then
+    printf "  - %s\n" "${used[@]}" >&2
+  else
+    ui "  (none)"
+  fi
+  ui ""
+
   suggested="$(next_free_rule_number "${used[@]}")"
-  echo "Existing DNAT rule numbers: ${used[*]:-(none)}"
-  echo "Suggested next free rule number: $suggested"
-  echo
+  ui "Suggested next free rule number: $suggested"
+  ui ""
 
   while true; do
     n="$(ask "DNAT rule number (new only)" "$suggested")"
-    [ -z "$n" ] && echo "Rule number required." && continue
+    [ -z "$n" ] && ui "Rule number required." && continue
     if ! require_numeric "$n"; then
-      echo "ERROR: must be a number (example: 10)."
+      ui "ERROR: must be a number (example: 10)."
       continue
     fi
     if is_number_in_list "$n" "${used[@]}"; then
-      echo "ERROR: rule $n already exists. Add mode will NOT overwrite."
-      echo "Use Update/Delete to change existing rules."
+      ui "ERROR: rule $n already exists. Add mode will NOT overwrite."
+      ui "Use Update/Delete to change existing rules."
       continue
     fi
     break
@@ -651,12 +667,19 @@ nat_add_dnat_guided() {
   desc="$(ask "Description (example: HTTP -> DMZ)" "DNAT")"
 
   mapfile -t ifs < <(scan_eth_ifaces)
-  require_nonempty_list_or_return "Ethernet interfaces (for inbound interface selection)" "${ifs[@]}" || return 0
+  ui ""
+  ui "Inbound interface choices (usually WAN like eth0):"
+  if [ "${#ifs[@]}" -gt 0 ]; then
+    printf "  - %s\n" "${ifs[@]}" >&2
+  else
+    ui "  (none detected)"
+  fi
+  ui ""
 
-  if select_from_list "Select inbound interface (usually WAN like eth0)" "${ifs[@]}"; then
+  if [ "${#ifs[@]}" -gt 0 ] && select_from_list "Select inbound interface" "${ifs[@]}"; then
     inif="$SELECTED"
   else
-    return 0
+    inif="$(ask "Inbound interface name (example: eth0)" "eth0")"
   fi
 
   proto="$(ask "Protocol (tcp/udp)" "tcp")"
@@ -664,14 +687,14 @@ nat_add_dnat_guided() {
   taddr="$(ask "Inside IP (example: 172.16.50.3)" "172.16.50.3")"
   tport="$(ask "Inside port (example: 80)" "80")"
 
-  echo
-  echo "SUMMARY (DNAT rule $n):"
-  echo "  description: $desc"
-  echo "  inbound-interface: $inif"
-  echo "  protocol: $proto"
-  echo "  public port: $dport"
-  echo "  translation: $taddr:$tport"
-  echo
+  ui ""
+  ui "SUMMARY (DNAT rule $n):"
+  ui "  description: $desc"
+  ui "  inbound-interface: $inif"
+  ui "  protocol: $proto"
+  ui "  public port: $dport"
+  ui "  translation: $taddr:$tport"
+  ui ""
   pause
 
   configure
@@ -687,15 +710,13 @@ nat_add_dnat_guided() {
 nat_update_single_field() {
   local type n tail val
 
-  refresh_cfg_cache
-
-  echo
-  echo "You selected: Update ONE field in an existing NAT rule"
-  echo "Next steps:"
-  echo "  1) Choose NAT type"
-  echo "  2) Choose EXISTING rule number"
-  echo "  3) Enter field path + new value"
-  echo
+  ui ""
+  ui "You selected: Update ONE field in an existing NAT rule"
+  ui "Next steps:"
+  ui "  1) Choose NAT type"
+  ui "  2) Choose EXISTING rule number"
+  ui "  3) Enter field path + new value"
+  ui ""
 
   type="$(nat_choose_type)"
   [ -z "$type" ] && return 0
@@ -703,16 +724,16 @@ nat_update_single_field() {
 
   nat_preview_rule "$type" "$n"
 
-  echo "Common field paths:"
-  echo "  description"
-  echo "  destination port"
-  echo "  inbound-interface name"
-  echo "  outbound-interface name"
-  echo "  source address"
-  echo "  protocol"
-  echo "  translation address"
-  echo "  translation port"
-  echo
+  ui "Common field paths:"
+  ui "  description"
+  ui "  destination port"
+  ui "  inbound-interface name"
+  ui "  outbound-interface name"
+  ui "  source address"
+  ui "  protocol"
+  ui "  translation address"
+  ui "  translation port"
+  ui ""
 
   tail="$(ask "Field path (words after: rule <N>)" "")"
   [ -z "$tail" ] && return 0
@@ -728,14 +749,12 @@ nat_update_single_field() {
 nat_delete_rule() {
   local type n
 
-  refresh_cfg_cache
-
-  echo
-  echo "You selected: Delete existing NAT rule"
-  echo "Next steps:"
-  echo "  1) Choose NAT type"
-  echo "  2) Choose EXISTING rule number to delete"
-  echo
+  ui ""
+  ui "You selected: Delete existing NAT rule"
+  ui "Next steps:"
+  ui "  1) Choose NAT type"
+  ui "  2) Choose EXISTING rule number to delete"
+  ui ""
 
   type="$(nat_choose_type)"
   [ -z "$type" ] && return 0
@@ -749,21 +768,20 @@ nat_delete_rule() {
 
 nat_menu() {
   while true; do
-    refresh_cfg_cache
-    echo
-    echo "=================="
-    echo " NAT Menu (Dynamic)"
-    echo "=================="
+    ui ""
+    ui "=================="
+    ui " NAT Menu (Dynamic)"
+    ui "=================="
     show_detected_summary
-    echo "SAFE RULES:"
-    echo "  - ADD DNAT will NOT overwrite existing rule numbers."
-    echo "  - Update/Delete only work on EXISTING rules."
-    echo
-    echo "1) List NAT (show commands)"
-    echo "2) Add DNAT rule (SAFE - new only)"
-    echo "3) Update ONE field in an existing NAT rule"
-    echo "4) Delete existing NAT rule"
-    echo "5) Back"
+    ui "SAFE RULES:"
+    ui "  - ADD DNAT will NOT overwrite existing rule numbers."
+    ui "  - Update/Delete only work on EXISTING rules."
+    ui ""
+    ui "1) List NAT (show commands)"
+    ui "2) Add DNAT rule (SAFE - new only)"
+    ui "3) Update ONE field in an existing NAT rule"
+    ui "4) Delete existing NAT rule"
+    ui "5) Back"
     read -r -p "Select menu option #: " c
     case "$c" in
       1) nat_list ;;
@@ -771,7 +789,7 @@ nat_menu() {
       3) nat_update_single_field ;;
       4) nat_delete_rule ;;
       5) return 0 ;;
-      *) echo "Invalid." ;;
+      *) ui "Invalid." ;;
     esac
   done
 }
@@ -781,20 +799,21 @@ nat_menu() {
 # -----------------------------
 iface_set_ip() {
   local ifs=() iface ip desc
-
-  refresh_cfg_cache
-
   mapfile -t ifs < <(scan_eth_ifaces)
 
-  echo
-  echo "You selected: Set interface IP + description"
-  echo "Next steps:"
-  echo "  1) Choose an interface"
-  echo "  2) Enter a CIDR address"
-  echo "  3) Optional description"
-  echo
+  ui ""
+  ui "You selected: Set interface IP + description"
+  ui "Next steps:"
+  ui "  1) Choose an interface"
+  ui "  2) Enter a CIDR address"
+  ui "  3) Optional description"
+  ui ""
 
   require_nonempty_list_or_return "Ethernet interfaces" "${ifs[@]}" || return 0
+
+  ui "Interfaces available:"
+  printf "  - %s\n" "${ifs[@]}" >&2
+  ui ""
 
   if select_from_list "Select interface to configure" "${ifs[@]}"; then
     iface="$SELECTED"
@@ -806,12 +825,12 @@ iface_set_ip() {
   [ -z "$ip" ] && return 0
   desc="$(ask "Description (optional) (example: Hamed-DMZ)" "")"
 
-  echo
-  echo "SUMMARY:"
-  echo "  interface: $iface"
-  echo "  address: $ip"
-  [ -n "$desc" ] && echo "  description: $desc"
-  echo
+  ui ""
+  ui "SUMMARY:"
+  ui "  interface: $iface"
+  ui "  address: $ip"
+  [ -n "$desc" ] && ui "  description: $desc"
+  ui ""
   pause
 
   configure
@@ -821,31 +840,30 @@ iface_set_ip() {
 }
 
 iface_show() {
-  echo
-  echo "You selected: Show interfaces"
-  echo
+  ui ""
+  ui "You selected: Show interfaces"
+  ui ""
   run show interfaces
-  echo
+  ui ""
   pause
 }
 
 iface_menu() {
   while true; do
-    refresh_cfg_cache
-    echo
-    echo "========================"
-    echo " Interfaces Menu (Dynamic)"
-    echo "========================"
+    ui ""
+    ui "========================"
+    ui " Interfaces Menu (Dynamic)"
+    ui "========================"
     show_detected_summary
-    echo "1) Set interface IP + description"
-    echo "2) Show interfaces"
-    echo "3) Back"
+    ui "1) Set interface IP + description"
+    ui "2) Show interfaces"
+    ui "3) Back"
     read -r -p "Select menu option #: " c
     case "$c" in
       1) iface_set_ip ;;
       2) iface_show ;;
       3) return 0 ;;
-      *) echo "Invalid." ;;
+      *) ui "Invalid." ;;
     esac
   done
 }
@@ -854,17 +872,17 @@ iface_menu() {
 # Raw mode (edit ANY aspect)
 # -----------------------------
 raw_mode() {
-  echo
-  echo "RAW MODE WARNING:"
-  echo "  Raw mode CAN overwrite or delete anything."
-  echo "  Only use if you know exactly what you are doing."
-  echo
-  echo "Type ONE config command starting with: set ...  OR  delete ..."
-  echo "Examples:"
-  echo "  delete interfaces ethernet eth1 address 172.16.50.2/29"
-  echo "  set firewall zone LAN from DMZ firewall name 'DMZ-to-LAN'"
-  echo "Blank = cancel"
-  echo
+  ui ""
+  ui "RAW MODE WARNING:"
+  ui "  Raw mode CAN overwrite or delete anything."
+  ui "  Only use if you know exactly what you are doing."
+  ui ""
+  ui "Type ONE config command starting with: set ...  OR  delete ..."
+  ui "Examples:"
+  ui "  delete interfaces ethernet eth1 address 172.16.50.2/29"
+  ui "  set firewall zone LAN from DMZ firewall name 'DMZ-to-LAN'"
+  ui "Blank = cancel"
+  ui ""
   local cmd yn
   read -r -p "> " cmd
   [ -z "$cmd" ] && return 0
@@ -873,7 +891,7 @@ raw_mode() {
   yn="${yn:-n}"
   case "$yn" in
     y|Y) ;;
-    *) echo "Canceled."; pause; return 0 ;;
+    *) ui "Canceled."; pause; return 0 ;;
   esac
 
   configure
@@ -888,28 +906,27 @@ main_menu() {
   die_no_access_if_needed
 
   while true; do
-    refresh_cfg_cache
-    echo
-    echo "=================================="
-    echo " VyOS Dynamic Menu (Scan + CRUD)"
-    echo "=================================="
+    ui ""
+    ui "=================================="
+    ui " VyOS Dynamic Menu (Scan + CRUD)"
+    ui "=================================="
     show_detected_summary
-    echo "1) Interfaces submenu"
-    echo "2) Firewall submenu"
-    echo "3) NAT submenu"
-    echo "4) Raw mode (set/delete anything)"
-    echo "5) Show full config (commands)"
-    echo "6) Exit"
-    echo
+    ui "1) Interfaces submenu"
+    ui "2) Firewall submenu"
+    ui "3) NAT submenu"
+    ui "4) Raw mode (set/delete anything)"
+    ui "5) Show full config (commands)"
+    ui "6) Exit"
+    ui ""
     read -r -p "Select menu option #: " c
     case "$c" in
       1) iface_menu ;;
       2) firewall_menu ;;
       3) nat_menu ;;
       4) raw_mode ;;
-      5) echo; printf "%s\n" "$CFG_CACHE"; echo; pause ;;
+      5) echo; get_cfg_cmds; echo; pause ;;
       6) exit 0 ;;
-      *) echo "Invalid." ;;
+      *) ui "Invalid." ;;
     esac
   done
 }
